@@ -1,4 +1,4 @@
-# ISUCONのススメ コード公開リポジトリ
+# ISUCONのススメ コード公開リポジトリ【商業版】
 サークルFratty[(@team_fratty)](https://twitter.com/team_fratty)の技術同人誌「Webサービスチューニングコンテスト ISUCONのススメ 初心者向けに環境構築から計測・改善まで解説する本」で使用するコード公開用リポジトリです。
 
 ## 本は[技術書典オンラインマーケットのページ](https://techbookfest.org/product/4915388672376832)から購入できます。
