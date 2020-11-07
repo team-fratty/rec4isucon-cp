@@ -984,12 +984,112 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	m.Stop()
 	m = measure.Start("getTransactions:part3")
 
+	itemIDs := make([]interface{}, 0, len(items))
+	userIdUnique := make(map[int64]struct{})
+	var userIds []interface{}
+	categoryIdsUnique := make(map[int]struct{})
+	var categoryIds []interface{}
+	for _, i := range items {
+		itemIDs = append(itemIDs, i.ID)
+		id := i.SellerID
+		if _, ok := userIdUnique[id]; !ok {
+			userIds = append(userIds, id)
+			userIdUnique[id] = struct{}{}
+		}
+		id = i.BuyerID
+		if _, ok := userIdUnique[id]; !ok {
+			userIds = append(userIds, id)
+			userIdUnique[id] = struct{}{}
+		}
+		catID := i.CategoryID
+		if _, ok := categoryIdsUnique[catID]; !ok {
+			categoryIds = append(categoryIds, catID)
+			categoryIdsUnique[catID] = struct{}{}
+		}
+	}
+	var users map[int64]UserSimple
+	if len(userIds) > 0 {
+		query, args, err := sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", userIds)
+		if err != nil {
+			log.Print(err)
+			outputErrorMsg(w, http.StatusInternalServerError, "db error")
+			tx.Rollback()
+			return
+		}
+		var s []User
+		err = tx.SelectContext(r.Context(), &s, query, args...)
+		if err != nil {
+			log.Print(err)
+			outputErrorMsg(w, http.StatusInternalServerError, "db error")
+			tx.Rollback()
+			return
+		}
+		users = make(map[int64]UserSimple, len(s))
+		for _, u := range s {
+			users[u.ID] = UserSimple{
+				ID:           u.ID,
+				AccountName:  u.AccountName,
+				NumSellItems: u.NumSellItems,
+			}
+		}
+	}
+	var categories map[int]Category
+	if len(categoryIds) > 0 {
+		query, args, err := sqlx.In("SELECT * FROM `categories` WHERE `id` IN (?)", categoryIds)
+		if err != nil {
+			log.Print(err)
+			outputErrorMsg(w, http.StatusInternalServerError, "db error")
+			tx.Rollback()
+			return
+		}
+		var s []Category
+		err = tx.SelectContext(r.Context(), &s, query, args...)
+		if err != nil {
+			log.Print(err)
+			outputErrorMsg(w, http.StatusInternalServerError, "db error")
+			tx.Rollback()
+			return
+		}
+		categories = make(map[int]Category, len(s))
+		for _, c := range s {
+			if c.ParentID != 0 {
+				p, err := getCategoryByID(tx, c.ParentID)
+				if err == nil {
+					c.ParentCategoryName = p.CategoryName
+				}
+			}
+			categories[c.ID] = c
+		}
+	}
+	var transactionEvidences map[int64]TransactionEvidence
+	if len(itemIDs) > 0 {
+		query, args, err := sqlx.In("SELECT * FROM `transaction_evidences` WHERE `item_id` IN (?)", itemIDs)
+		if err != nil {
+			log.Print(err)
+			outputErrorMsg(w, http.StatusInternalServerError, "db error")
+			tx.Rollback()
+			return
+		}
+		var s []TransactionEvidence
+		err = tx.SelectContext(r.Context(), &s, query, args...)
+		if err != nil {
+			log.Print(err)
+			outputErrorMsg(w, http.StatusInternalServerError, "db error")
+			tx.Rollback()
+			return
+		}
+		transactionEvidences = make(map[int64]TransactionEvidence, len(s))
+		for _, c := range s {
+			transactionEvidences[c.ItemID] = c
+		}
+	}
+
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
 		m := measure.Start("getTransactions:part3-1")
 
-		seller, err := getUserSimpleByID(tx, item.SellerID)
-		if err != nil {
+		seller, ok := users[item.SellerID]
+		if !ok {
 			outputErrorMsg(w, http.StatusNotFound, "seller not found")
 			tx.Rollback()
 			return
@@ -998,8 +1098,8 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		m.Stop()
 		m = measure.Start("getTransactions:part3-2")
 
-		category, err := getCategoryByID(tx, item.CategoryID)
-		if err != nil {
+		category, ok := categories[item.CategoryID]
+		if !ok {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
 			tx.Rollback()
 			return
@@ -1028,8 +1128,8 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		m = measure.Start("getTransactions:part3-3")
 
 		if item.BuyerID != 0 {
-			buyer, err := getUserSimpleByID(tx, item.BuyerID)
-			if err != nil {
+			buyer, ok := users[item.BuyerID]
+			if !ok {
 				outputErrorMsg(w, http.StatusNotFound, "buyer not found")
 				tx.Rollback()
 				return
@@ -1041,15 +1141,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		m.Stop()
 		m = measure.Start("getTransactions:part3-4")
 
-		transactionEvidence := TransactionEvidence{}
-		err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
-		if err != nil && err != sql.ErrNoRows {
-			// It's able to ignore ErrNoRows
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
+		transactionEvidence, ok := transactionEvidences[item.ID]
 
 		m.Stop()
 		m = measure.Start("getTransactions:part3-5")
