@@ -1006,7 +1006,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 	categoryMap := make(map[int]Category, len(categoryIDs)) // カテゴリデータの格納map
 	if len(categoryIDs) > 0 {
-		query, args, _ := sqlx.In("SELECT * FROM `categories` WHERE `id` IN (?)", userIDs)
+		query, args, _ := sqlx.In("SELECT * FROM `categories` WHERE `id` IN (?)", categoryIDs)
 		var categories []Category // SQL結果格納先
 		tx.Select(&categories, query, args...)
 		for _, category := range categories {
@@ -1029,8 +1029,8 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			tx.Rollback()
 			return
 		}
-		category, err := getCategoryByID(tx, item.CategoryID)
-		if err != nil {
+		category, ok := categoryMap[item.CategoryID]
+		if !ok {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
 			tx.Rollback()
 			return

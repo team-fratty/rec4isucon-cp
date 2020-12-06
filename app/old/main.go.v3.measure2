@@ -399,7 +399,7 @@ func getStats(w http.ResponseWriter, r *http.Request) {
 
 	body := bytes.NewBufferString("key,count,sum,avg\n")
 	for _, s := range logs {
-		body.WriteString(fmt.Sprintf("%s,%d,%f,%f\n",
+		body.WriteString(fmt.Sprintf("%s,%d,%.0f,%.2f\n",
 			s.Key, s.Count, s.Sum, s.Avg))
 	}
 
