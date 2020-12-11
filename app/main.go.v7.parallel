@@ -1040,12 +1040,12 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m2.Stop()
-	m2 := measure.Start("getTransactions:part3-1-1")
+	m2 = measure.Start("getTransactions:part3-1-1")
 
 	var wg sync.WaitGroup
 	var shipmentStatuses sync.Map
 	var concurrentError atomic.Value
-	for _, t := range transactionEvidences {
+	for _, t := range transactionEvidenceMap {
 		wg.Add(1)
 		go func(t TransactionEvidence) {
 			defer wg.Done()
