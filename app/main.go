@@ -16,6 +16,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -1038,6 +1040,35 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m2.Stop()
+	m2 = measure.Start("getTransactions:part3-1-1")
+
+	var wg sync.WaitGroup
+	var shipmentStatuses sync.Map
+	var concurrentError atomic.Value
+	for _, t := range transactionEvidenceMap {
+		wg.Add(1)
+		go func(t TransactionEvidence) {
+			defer wg.Done()
+			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
+				ReserveID: t.ReserveID,
+			})
+			if err != nil {
+				concurrentError.Store(err)
+				return
+			}
+			shipmentStatuses.Store(t.ItemID, ssr)
+		}(t)
+	}
+	wg.Wait()
+	cerr := concurrentError.Load()
+	if cerr != nil {
+		log.Print(cerr)
+		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+		tx.Rollback()
+		return
+	}
+
+	m2.Stop()
 
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
@@ -1092,19 +1123,16 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		// mapからの取得に置き換え
 		transactionEvidence, ok := transactionEvidenceMap[item.ID]
 		if ok {
-			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-				ReserveID: transactionEvidence.ReserveID,
-			})
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+			ssr, ok := shipmentStatuses.Load(item.ID)
+			if !ok {
+				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
 				tx.Rollback()
 				return
 			}
 
 			itemDetail.TransactionEvidenceID = transactionEvidence.ID
 			itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
-			itemDetail.ShippingStatus = ssr.Status
+			itemDetail.ShippingStatus = ssr.(*APIShipmentStatusRes).Status
 		}
 
 		itemDetails = append(itemDetails, itemDetail)
