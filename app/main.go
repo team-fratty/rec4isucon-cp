@@ -16,6 +16,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -149,6 +151,7 @@ type TransactionEvidence struct {
 	ItemRootCategoryID int       `json:"item_root_category_id" db:"item_root_category_id"`
 	CreatedAt          time.Time `json:"-" db:"created_at"`
 	UpdatedAt          time.Time `json:"-" db:"updated_at"`
+	ReserveID          string    `json:"-" db:"reserve_id"`
 }
 
 type Shipping struct {
@@ -983,17 +986,102 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 
 	m.Stop()
 	m = measure.Start("getTransactions:part3")
+	m2 := measure.Start("getTransactions:part3-1")
+
+	var userIDs []interface{}     // IN句の引数に代入するユーザID
+	var categoryIDs []interface{} // IN句の引数に代入するカテゴリID
+	for _, item := range items {
+		userIDs = append(userIDs, item.SellerID)
+		categoryIDs = append(categoryIDs, item.CategoryID)
+		userIDs = append(userIDs, item.BuyerID)
+	}
+	userSimpleMap := make(map[int64]UserSimple, len(userIDs)) // ユーザデータの格納map
+	if len(userIDs) > 0 {
+		query, args, _ := sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", userIDs)
+		var users []User // SQL結果格納先
+		tx.Select(&users, query, args...)
+		for _, user := range users {
+			userSimpleMap[user.ID] = UserSimple{
+				ID:           user.ID,
+				AccountName:  user.AccountName,
+				NumSellItems: user.NumSellItems,
+			}
+		}
+	}
+	categoryMap := make(map[int]Category, len(categoryIDs)) // カテゴリデータの格納map
+	if len(categoryIDs) > 0 {
+		query, args, _ := sqlx.In("SELECT * FROM `categories` WHERE `id` IN (?)", categoryIDs)
+		var categories []Category // SQL結果格納先
+		tx.Select(&categories, query, args...)
+		for _, category := range categories {
+			if category.ParentID != 0 {
+				parentCategory, err := getCategoryByID(tx, category.ParentID)
+				if err != nil {
+					category.ParentCategoryName = parentCategory.CategoryName
+				}
+				category.ParentCategoryName = parentCategory.CategoryName
+			}
+			categoryMap[category.ID] = category
+		}
+	}
+
+	var itemIDs []interface{} // IN句の引数に代入するアイテムID
+	for _, item := range items {
+		itemIDs = append(itemIDs, item.ID)
+	}
+	transactionEvidenceMap := make(map[int64]TransactionEvidence, len(itemIDs)) // transactionEvidenceデータの格納map
+	if len(itemIDs) > 0 {
+		query, args, _ := sqlx.In("SELECT t.item_id, t.id, t.status, s.reserve_id FROM transaction_evidences t JOIN shippings s ON t.id = s.transaction_evidence_id WHERE t.item_id IN (?)", itemIDs)
+		var transactionEvidences []TransactionEvidence // SQL結果格納先
+		tx.Select(&transactionEvidences, query, args...)
+		for _, transactionEvidence := range transactionEvidences {
+			transactionEvidenceMap[transactionEvidence.ItemID] = transactionEvidence
+		}
+	}
+
+	m2.Stop()
+	m2 = measure.Start("getTransactions:part3-1-1")
+
+	var wg sync.WaitGroup
+	var shipmentStatuses sync.Map
+	var concurrentError atomic.Value
+	for _, t := range transactionEvidenceMap {
+		wg.Add(1)
+		go func(t TransactionEvidence) {
+			defer wg.Done()
+			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
+				ReserveID: t.ReserveID,
+			})
+			if err != nil {
+				concurrentError.Store(err)
+				return
+			}
+			shipmentStatuses.Store(t.ItemID, ssr)
+		}(t)
+	}
+	wg.Wait()
+	cerr := concurrentError.Load()
+	if cerr != nil {
+		log.Print(cerr)
+		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+		tx.Rollback()
+		return
+	}
+
+	m2.Stop()
 
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
-		seller, err := getUserSimpleByID(tx, item.SellerID)
-		if err != nil {
+		m2 = measure.Start("getTransactions:part3-2")
+
+		seller, ok := userSimpleMap[item.SellerID]
+		if !ok {
 			outputErrorMsg(w, http.StatusNotFound, "seller not found")
 			tx.Rollback()
 			return
 		}
-		category, err := getCategoryByID(tx, item.CategoryID)
-		if err != nil {
+		category, ok := categoryMap[item.CategoryID]
+		if !ok {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
 			tx.Rollback()
 			return
@@ -1019,8 +1107,8 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if item.BuyerID != 0 {
-			buyer, err := getUserSimpleByID(tx, item.BuyerID)
-			if err != nil {
+			buyer, ok := userSimpleMap[item.BuyerID]
+			if !ok {
 				outputErrorMsg(w, http.StatusNotFound, "buyer not found")
 				tx.Rollback()
 				return
@@ -1029,46 +1117,27 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			itemDetail.Buyer = &buyer
 		}
 
-		transactionEvidence := TransactionEvidence{}
-		err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
-		if err != nil && err != sql.ErrNoRows {
-			// It's able to ignore ErrNoRows
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
+		m2.Stop()
+		m2 = measure.Start("getTransactions:part3-3")
 
-		if transactionEvidence.ID > 0 {
-			shipping := Shipping{}
-			err = tx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
-			if err == sql.ErrNoRows {
+		// mapからの取得に置き換え
+		transactionEvidence, ok := transactionEvidenceMap[item.ID]
+		if ok {
+			ssr, ok := shipmentStatuses.Load(item.ID)
+			if !ok {
 				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
-				tx.Rollback()
-				return
-			}
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "db error")
-				tx.Rollback()
-				return
-			}
-			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-				ReserveID: shipping.ReserveID,
-			})
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
 				tx.Rollback()
 				return
 			}
 
 			itemDetail.TransactionEvidenceID = transactionEvidence.ID
 			itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
-			itemDetail.ShippingStatus = ssr.Status
+			itemDetail.ShippingStatus = ssr.(*APIShipmentStatusRes).Status
 		}
 
 		itemDetails = append(itemDetails, itemDetail)
+
+		m2.Stop()
 	}
 	tx.Commit()
 
