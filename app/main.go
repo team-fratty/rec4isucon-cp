@@ -984,9 +984,12 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	m.Stop()
 	m = measure.Start("getTransactions:part3")
 
-	var userIDs []interface{} // IN句の引数に代入するユーザID
+	var userIDs []interface{}     // IN句の引数に代入するユーザID
+	var categoryIDs []interface{} // IN句の引数に代入するカテゴリID
 	for _, item := range items {
 		userIDs = append(userIDs, item.SellerID)
+		categoryIDs = append(categoryIDs, item.CategoryID)
+		userIDs = append(userIDs, item.BuyerID)
 	}
 	userSimpleMap := make(map[int64]UserSimple, len(userIDs)) // ユーザデータの格納map
 	if len(userIDs) > 0 {
@@ -1001,6 +1004,22 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	categoryMap := make(map[int]Category, len(categoryIDs)) // カテゴリデータの格納map
+	if len(categoryIDs) > 0 {
+		query, args, _ := sqlx.In("SELECT * FROM `categories` WHERE `id` IN (?)", categoryIDs)
+		var categories []Category // SQL結果格納先
+		tx.Select(&categories, query, args...)
+		for _, category := range categories {
+			if category.ParentID != 0 {
+				parentCategory, err := getCategoryByID(tx, category.ParentID)
+				if err != nil {
+					category.ParentCategoryName = parentCategory.CategoryName
+				}
+				category.ParentCategoryName = parentCategory.CategoryName
+			}
+			categoryMap[category.ID] = category
+		}
+	}
 
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
@@ -1010,8 +1029,8 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			tx.Rollback()
 			return
 		}
-		category, err := getCategoryByID(tx, item.CategoryID)
-		if err != nil {
+		category, ok := categoryMap[item.CategoryID]
+		if !ok {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
 			tx.Rollback()
 			return
@@ -1037,8 +1056,8 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if item.BuyerID != 0 {
-			buyer, err := getUserSimpleByID(tx, item.BuyerID)
-			if err != nil {
+			buyer, ok := userSimpleMap[item.BuyerID]
+			if !ok {
 				outputErrorMsg(w, http.StatusNotFound, "buyer not found")
 				tx.Rollback()
 				return
