@@ -149,6 +149,7 @@ type TransactionEvidence struct {
 	ItemRootCategoryID int       `json:"item_root_category_id" db:"item_root_category_id"`
 	CreatedAt          time.Time `json:"-" db:"created_at"`
 	UpdatedAt          time.Time `json:"-" db:"updated_at"`
+	ReserveID          string    `json:"-" db:"reserve_id"`
 }
 
 type Shipping struct {
@@ -1021,6 +1022,20 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var itemIDs []interface{} // IN句の引数に代入するアイテムID
+	for _, item := range items {
+		itemIDs = append(itemIDs, item.ID)
+	}
+	transactionEvidenceMap := make(map[int64]TransactionEvidence, len(itemIDs)) // transactionEvidenceデータの格納map
+	if len(itemIDs) > 0 {
+		query, args, _ := sqlx.In("SELECT t.item_id, t.id, t.status, s.reserve_id FROM transaction_evidences t JOIN shippings s ON t.id = s.transaction_evidence_id WHERE t.item_id IN (?)", itemIDs)
+		var transactionEvidences []TransactionEvidence // SQL結果格納先
+		tx.Select(&transactionEvidences, query, args...)
+		for _, transactionEvidence := range transactionEvidences {
+			transactionEvidenceMap[transactionEvidence.ItemID] = transactionEvidence
+		}
+	}
+
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
 		seller, ok := userSimpleMap[item.SellerID]
@@ -1066,32 +1081,11 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			itemDetail.Buyer = &buyer
 		}
 
-		transactionEvidence := TransactionEvidence{}
-		err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
-		if err != nil && err != sql.ErrNoRows {
-			// It's able to ignore ErrNoRows
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
-
-		if transactionEvidence.ID > 0 {
-			shipping := Shipping{}
-			err = tx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
-			if err == sql.ErrNoRows {
-				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
-				tx.Rollback()
-				return
-			}
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "db error")
-				tx.Rollback()
-				return
-			}
+		// mapからの取得に置き換え
+		transactionEvidence, ok := transactionEvidenceMap[item.ID]
+		if ok {
 			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-				ReserveID: shipping.ReserveID,
+				ReserveID: transactionEvidence.ReserveID,
 			})
 			if err != nil {
 				log.Print(err)
