@@ -984,10 +984,28 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	m.Stop()
 	m = measure.Start("getTransactions:part3")
 
+	var userIDs []interface{} // IN句の引数に代入するユーザID
+	for _, item := range items {
+		userIDs = append(userIDs, item.SellerID)
+	}
+	userSimpleMap := make(map[int64]UserSimple, len(userIDs)) // ユーザデータの格納map
+	if len(userIDs) > 0 {
+		query, args, _ := sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", userIDs)
+		var users []User // SQL結果格納先
+		tx.Select(&users, query, args...)
+		for _, user := range users {
+			userSimpleMap[user.ID] = UserSimple{
+				ID:           user.ID,
+				AccountName:  user.AccountName,
+				NumSellItems: user.NumSellItems,
+			}
+		}
+	}
+
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
-		seller, err := getUserSimpleByID(tx, item.SellerID)
-		if err != nil {
+		seller, ok := userSimpleMap[item.SellerID]
+		if !ok {
 			outputErrorMsg(w, http.StatusNotFound, "seller not found")
 			tx.Rollback()
 			return
